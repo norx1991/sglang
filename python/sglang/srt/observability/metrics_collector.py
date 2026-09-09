@@ -156,6 +156,8 @@ class SchedulerStats:
     # HiCache metrics
     hicache_host_used_tokens: int = 0
     hicache_host_total_tokens: int = 0
+    hicache_swa_host_used_tokens: int = 0
+    hicache_swa_host_total_tokens: int = 0
 
     # Streaming session metrics
     num_streaming_sessions: int = 0
@@ -648,6 +650,27 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
             self.hicache_host_total_tokens = Gauge(
                 name="sglang:hicache_host_total_tokens",
                 documentation="Total capacity of the host KV cache in tokens.",
+                labelnames=labels.keys(),
+                multiprocess_mode="mostrecent",
+            )
+            # Hybrid-SWA models keep a second, independently sized host pool.
+            # The gauges above cover the full-attention pool only, so without
+            # these the SWA pool's occupancy is unobservable.
+            self.hicache_swa_host_used_tokens = Gauge(
+                name="sglang:hicache_swa_host_used_tokens",
+                documentation=(
+                    "Number of tokens currently used in the SWA host KV cache "
+                    "(hybrid-SWA models only; 0 otherwise)."
+                ),
+                labelnames=labels.keys(),
+                multiprocess_mode="mostrecent",
+            )
+            self.hicache_swa_host_total_tokens = Gauge(
+                name="sglang:hicache_swa_host_total_tokens",
+                documentation=(
+                    "Total capacity of the SWA host KV cache in tokens "
+                    "(hybrid-SWA models only; 0 otherwise)."
+                ),
                 labelnames=labels.keys(),
                 multiprocess_mode="mostrecent",
             )
@@ -1440,6 +1463,12 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
             )
             self._log_gauge(
                 self.hicache_host_total_tokens, stats.hicache_host_total_tokens
+            )
+            self._log_gauge(
+                self.hicache_swa_host_used_tokens, stats.hicache_swa_host_used_tokens
+            )
+            self._log_gauge(
+                self.hicache_swa_host_total_tokens, stats.hicache_swa_host_total_tokens
             )
 
         # Streaming session metrics

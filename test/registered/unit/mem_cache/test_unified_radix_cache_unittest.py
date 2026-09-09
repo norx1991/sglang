@@ -1,6 +1,7 @@
 """Unit tests for UnifiedRadixCache"""
 
 import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -9404,3 +9405,53 @@ class TestAnchorLockOutcomePolicy(CustomTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHiCacheSwaHostPoolWarning(CustomTestCase):
+    """The SWA host pool caps the host hit rate of the full pool too.
+
+    Prefix matching combines the per-component validators with all(), so a node
+    whose SWA half has left both device and host ends the walk before the
+    full-KV half can contribute to host_hit_length. An undersized SWA host pool
+    therefore drives host_hit to zero while D2H counters still look healthy.
+    Warn instead of failing silently.
+    """
+
+    cfg = CacheConfig(
+        page_size=1,
+        components=(ComponentType.FULL, ComponentType.SWA),
+        sliding_window_size=4,
+    )
+    _init_hicache = TestUnifiedRadixPrefetchCorruption._init_hicache
+
+    class _StubPool:
+        def __init__(self, logical_size):
+            self.logical_size = logical_size
+
+    def _warns(self, cache, full_tokens, swa_tokens):
+        cache.full_kv_pool_host = self._StubPool(full_tokens)
+        swa = self._StubPool(swa_tokens) if swa_tokens is not None else None
+        with self.assertLogs(
+            "sglang.srt.mem_cache.unified_radix_cache", level="WARNING"
+        ) as captured:
+            logging.getLogger("sglang.srt.mem_cache.unified_radix_cache").warning(
+                "sentinel"
+            )
+            cache._warn_if_swa_host_pool_undersized(swa)
+        return any("SWA host pool" in line for line in captured.output)
+
+    def test_warns_only_when_swa_host_pool_is_undersized(self):
+        cache, _, _ = build_fixture(self.cfg)
+        self._init_hicache(cache)
+        # Sizes taken from a hybrid-SWA deployment at swa_full_tokens_ratio 0.1
+        # (419 vs 39 pages of 512) and at 1.0 (140 vs 135).
+        self.assertTrue(self._warns(cache, 419 * 512, 39 * 512))
+        self.assertFalse(self._warns(cache, 140 * 512, 135 * 512))
+        self.assertFalse(self._warns(cache, 100_000, 100_000))
+        # The declared fallback ratio is 0.8. A default hybrid-SWA run must not
+        # warn, or every such deployment would see this on startup.
+        self.assertFalse(self._warns(cache, 100_000, 80_000))
+        # 0.1 is what several architectures set today, and is the bad case.
+        self.assertTrue(self._warns(cache, 100_000, 10_000))
+        # Non-hybrid models have no SWA host pool and must stay quiet.
+        self.assertFalse(self._warns(cache, 100_000, None))

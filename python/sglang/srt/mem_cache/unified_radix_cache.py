@@ -435,6 +435,7 @@ class UnifiedRadixCache(BasePrefixCache):
             if self.supports_swa():
                 swa = self.components[ComponentType.SWA]
                 self.tree_core.has_swa_host_pool = swa._swa_kv_pool_host is not None
+                self._warn_if_swa_host_pool_undersized(swa._swa_kv_pool_host)
 
         if self.host_memory_mode == "buffer_only":
             swa = self.components.get(ComponentType.SWA)
@@ -498,6 +499,46 @@ class UnifiedRadixCache(BasePrefixCache):
                 enable_storage_metrics=self._enable_metrics_flag,
                 extra_metric_labels=self.extra_metric_labels,
             )
+
+    def _warn_if_swa_host_pool_undersized(self, swa_host_pool) -> None:
+        """Warn when the SWA host pool is too small for L2 to ever hit.
+
+        Prefix matching requires every component to validate (the per-component
+        validators are combined with ``all()``), so the SWA validator rejects a
+        node whose SWA half is absent from both device and host. A node rejected
+        there ends the walk before the full-KV half -- which may still be
+        host-resident -- can contribute to ``host_hit_length``.
+
+        The upshot is that the *smaller* of the two host pools caps the host hit
+        rate of both. Both pools ingest the same token volume, so the SWA pool
+        turns over ``1 / swa_full_tokens_ratio`` times as fast; at the 0.1 some
+        architectures set, that is 10x, and ``host_hit`` sits at zero while
+        HiCache keeps writing to host and reporting healthy D2H counters. The
+        failure is otherwise invisible, so say it out loud.
+
+        The threshold is deliberately well below the 0.8 fallback ratio: at 0.8
+        the SWA pool turns over only 1.25x faster and still retains a usable
+        window, so warning there would fire on every default hybrid-SWA run.
+        0.5 (2x turnover) is the point where the smaller pool starts to dominate.
+        """
+        full_host_pool = getattr(self, "full_kv_pool_host", None)
+        if swa_host_pool is None or full_host_pool is None:
+            return
+        swa_size = getattr(swa_host_pool, "logical_size", 0)
+        full_size = getattr(full_host_pool, "logical_size", 0)
+        if not swa_size or not full_size or swa_size >= full_size * 0.5:
+            return
+        logger.warning(
+            "HiCache: the SWA host pool holds %d tokens against the full-attention "
+            "pool's %d (%.2fx). Because prefix matching requires all components to "
+            "validate, the SWA half is evicted from host first and suppresses host "
+            "hits for the full half as well, so the L2 tier may never serve a "
+            "read-back. Raise --swa-full-tokens-ratio to size the two pools alike, "
+            "or set --disable-hybrid-swa-memory.",
+            swa_size,
+            full_size,
+            swa_size / full_size,
+        )
 
     def register_sidecar_pool(
         self, spec: SidecarPoolSpec, entry: Optional[PoolEntry] = None

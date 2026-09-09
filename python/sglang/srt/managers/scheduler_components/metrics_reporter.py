@@ -1164,6 +1164,17 @@ class SchedulerMetricsReporter:
         self.stats.hicache_host_used_tokens = host_total - host_pool.available_size()
         self.stats.hicache_host_total_tokens = host_total
 
+        # Hybrid-SWA models mirror a second host pool for the SWA layers, sized
+        # independently of the one above. Report it separately rather than
+        # leaving it unobservable.
+        swa_pool = getattr(self.scheduler.tree_cache, "swa_kv_pool_host", None)
+        if swa_pool is not None:
+            swa_total = swa_pool.logical_size
+            self.stats.hicache_swa_host_used_tokens = (
+                swa_total - swa_pool.available_size()
+            )
+            self.stats.hicache_swa_host_total_tokens = swa_total
+
     def _update_lora_metrics(self):
         """Update LoRA pool metrics for monitoring and autoscaling."""
         if not self.scheduler.enable_lora:
