@@ -3966,9 +3966,15 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
                     # Past the window the request no longer reads its prefill's SWA;
                     # release that part of the tree lock so SWA LRU can reclaim it.
+                    # Count tokens past the locked prefix: a speculative step adds
+                    # several tokens, so decode steps would release far later. The
+                    # next query, at seqlen - 1, reads [seqlen - 1 - W, seqlen - 1].
+                    # At decode_batch_idx 0 the overlapped prefill may still read it.
                     if (
                         release_leaf_lock
-                        and req.decode_batch_idx >= sliding_window_size
+                        and req.decode_batch_idx >= 1
+                        and req.seqlen - 1 - req.kv.cache_protected_len
+                        >= sliding_window_size
                     ):
                         self.tree_cache.release_swa_prefix_lock(req)
                 elif (

@@ -125,6 +125,38 @@ class TestSWAEvictionInterval(unittest.TestCase):
         self.assertTrue(torch.equal(free.call_args.args[0], torch.arange(64)))
         self.assertEqual(req.kv.get_evicted_seqlen(ComponentType.SWA), 64)
 
+    def test_prefill_swa_release_counts_tokens_past_the_locked_prefix(self):
+        """The prefill SWA lock is released once the request is a window past its
+        locked prefix, even when a speculative step committed several tokens per
+        decode step, and never on the first decode step, which an overlapped
+        prefill may still read."""
+        cache = _SwaCache()
+        cache.release_swa_prefix_lock = Mock()
+        req = SimpleNamespace(
+            seqlen=256 + 129,
+            decode_batch_idx=0,
+            kv=ReqKvInfo(req_pool_idx=0, cache_protected_len=256),
+        )
+        batch = ScheduleBatch(
+            reqs=[req],
+            tree_cache=cache,
+            req_to_token_pool=cache.req_to_token_pool,
+            token_to_kv_pool_allocator=cache.token_to_kv_pool_allocator,
+            forward_mode=ForwardMode.DECODE,
+        )
+        with (
+            envs.SGLANG_SWA_EVICTION_INTERVAL.override(1),
+            envs.SGLANG_OPT_RELEASE_PREFILL_SWA.override(True),
+        ):
+            batch.maybe_evict_swa()
+            cache.release_swa_prefix_lock.assert_not_called()
+            req.decode_batch_idx, req.seqlen = 20, 256 + 128
+            batch.maybe_evict_swa()
+            cache.release_swa_prefix_lock.assert_not_called()
+            req.seqlen += 1
+            batch.maybe_evict_swa()
+        cache.release_swa_prefix_lock.assert_called_once_with(req)
+
 
 if __name__ == "__main__":
     unittest.main()
